@@ -13,13 +13,15 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -27,43 +29,78 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+          accept-android-sdk-licenses: true
 
-      - name: Extract project
+      - name: Check Android SDK
+        shell: bash
         run: |
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "Keine ZIP-Datei gefunden!"
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-not set}"
+          command -v sdkmanager
+          sdkmanager --list_installed
+
+      - name: Find and extract project ZIP
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t zips < <(find . -maxdepth 1 -type f -iname "*.zip")
+
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "::error::No project ZIP found."
             exit 1
           fi
-          mkdir extracted
-          unzip "$ZIP_FILE" -d extracted
 
-      - name: Find Android project
-        run: |
-          SETTINGS=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
-          if [ -z "$SETTINGS" ]; then
-            echo "Keine Gradle-Android-Projektdatei gefunden!"
+          if [ "${#zips[@]}" -gt 1 ]; then
+            echo "::error::Multiple ZIP files found. Keep only the NIGHTLINK source ZIP."
+            printf '%s\n' "${zips[@]}"
             exit 1
           fi
-          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+
+          mkdir -p extracted
+          unzip -q "${zips[0]}" -d extracted
+
+          settings_file="$(find extracted -type f -name settings.gradle -print -quit)"
+
+          if [ -z "$settings_file" ]; then
+            settings_file="$(find extracted -type f -name settings.gradle.kts -print -quit)"
+          fi
+
+          if [ -z "$settings_file" ]; then
+            echo "::error::No Gradle project found inside ZIP."
+            find extracted -maxdepth 3 -type f | head -80
+            exit 1
+          fi
+
+          project_dir="$(dirname "$settings_file")"
+          echo "project_dir=$project_dir" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
-        run: gradle -p "$PROJECT_DIR" :app:assembleDebug
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon --stacktrace assembleDebug
+          else
+            echo "No Gradle wrapper found; using Gradle 8.9."
+            gradle --no-daemon --stacktrace assembleDebug
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NIGHTLINK-debug-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
