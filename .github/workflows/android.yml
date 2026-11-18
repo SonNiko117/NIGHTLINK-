@@ -1,4 +1,3 @@
-
 name: Build NIGHTLINK APK
 
 on:
@@ -30,19 +29,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
-          accept-android-sdk-licenses: true
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      - name: Check Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "ANDROID_HOME=${ANDROID_HOME:-not set}"
-          command -v sdkmanager
-          sdkmanager --list_installed
+      - name: Set up Gradle 8.9 (cache + fallback)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
 
       - name: Find and extract project ZIP
         id: project
@@ -66,11 +58,11 @@ jobs:
           mkdir -p extracted
           unzip -q "${zips[0]}" -d extracted
 
-          settings_file="$(find extracted -type f -name settings.gradle -print -quit)"
-
-          if [ -z "$settings_file" ]; then
-            settings_file="$(find extracted -type f -name settings.gradle.kts -print -quit)"
-          fi
+          settings_file="$(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -not -path '*/__MACOSX/*' \
+            | awk '{ print gsub("/","/"), $0 }' | sort -n \
+            | sed -n '1p' | cut -d' ' -f2-)"
 
           if [ -z "$settings_file" ]; then
             echo "::error::No Gradle project found inside ZIP."
@@ -79,6 +71,7 @@ jobs:
           fi
 
           project_dir="$(dirname "$settings_file")"
+          echo "Using project: $project_dir"
           echo "project_dir=$project_dir" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
@@ -90,6 +83,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           if [ -f "./gradlew" ]; then
+            sed -i 's/\r$//' ./gradlew
             chmod +x ./gradlew
             ./gradlew --no-daemon --stacktrace assembleDebug
           else
