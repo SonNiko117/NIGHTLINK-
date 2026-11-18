@@ -1,11 +1,10 @@
 
-
 name: Build NIGHTLINK APK
 
 on:
   push:
     paths:
-      - "NIGHTLINK-0.2-source.zip"
+      - "*.zip"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -28,8 +27,6 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
 
       - name: Install Android SDK packages
         run: |
@@ -43,16 +40,30 @@ jobs:
           gradle-version: "8.9"
 
       - name: Extract project
-        run: unzip NIGHTLINK-0.2-source.zip -d extracted
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Keine ZIP-Datei gefunden!"
+            exit 1
+          fi
+          mkdir extracted
+          unzip "$ZIP_FILE" -d extracted
+
+      - name: Find Android project
+        run: |
+          SETTINGS=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
+          if [ -z "$SETTINGS" ]; then
+            echo "Keine Gradle-Android-Projektdatei gefunden!"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
 
       - name: Build debug APK
-        run: gradle -p extracted/NIGHTLINK :app:assembleDebug
+        run: gradle -p "$PROJECT_DIR" :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NIGHTLINK-debug-APK
-          path: extracted/NIGHTLINK/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-
