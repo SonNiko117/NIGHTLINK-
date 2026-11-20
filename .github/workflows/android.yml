@@ -1,9 +1,6 @@
 
 name: Build NIGHTLINK debug APK
 
-# Baut ausschließlich die DEBUG-APK.
-# Keine Release-APK und keine Veröffentlichung.
-
 on:
   push:
     paths-ignore:
@@ -53,13 +50,8 @@ jobs:
           else
             mapfile -t zips < <(find . -maxdepth 1 -type f -iname "*.zip" | sort)
 
-            if [ "${#zips[@]}" -eq 0 ]; then
-              echo "::error::No Gradle project or source ZIP found."
-              exit 1
-            fi
-
-            if [ "${#zips[@]}" -gt 1 ]; then
-              echo "::error::Multiple ZIP files found."
+            if [ "${#zips[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one source ZIP."
               printf '%s\n' "${zips[@]}"
               exit 1
             fi
@@ -70,8 +62,8 @@ jobs:
             settings_file="$(find extracted -type f \
               \( -name settings.gradle -o -name settings.gradle.kts \) \
               -not -path '*/__MACOSX/*' \
-              | awk '{ print gsub("/","/"), $0 }' | sort -n \
-              | sed -n '1p' | cut -d' ' -f2-)"
+              | awk '{ print gsub("/","/"), $0 }' \
+              | sort -n | sed -n '1p' | cut -d' ' -f2-)"
 
             if [ -z "$settings_file" ]; then
               echo "::error::No Gradle project found inside ZIP."
@@ -114,7 +106,6 @@ jobs:
           fi
 
       - name: Verify APK and prepare artifact
-        id: apk
         shell: bash
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
@@ -133,7 +124,6 @@ jobs:
 
           apk="${apks[0]}"
           bt="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
-          badging="$("$bt/aapt2" dump badging "$apk")"
 
           fail() {
             echo "::error::$1"
@@ -142,12 +132,30 @@ jobs:
 
           echo "APK: $apk"
 
-          app_id="$(sed -nE "s/^package: name='([^']+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
-          vcode="$(sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
-          vname="$(sed -nE "s/.*versionName='([^']*)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+          # APK-Metadaten auslesen
+          if [ -x "$bt/aapt" ]; then
+            badging="$("$bt/aapt" dump badging "$apk")"
+          else
+            badging="$("$bt/aapt2" dump badging "$apk")"
+          fi
 
-          # Liest minSdk unabhängig von Leerzeichen und weiteren Feldern aus.
-          min_sdk="$(sed -nE "s/.*sdkVersion:[[:space:]]*'([0-9]+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+          echo "$badging"
+
+          app_id="$(sed -nE "s/^package: name='([^']+)'.*/\1/p" <<<"$badging" | head -n1)"
+          vcode="$(sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" <<<"$badging" | head -n1)"
+          vname="$(sed -nE "s/.*versionName='([^']*)'.*/\1/p" <<<"$badging" | head -n1)"
+
+          # minSdk zuerst aus aapt lesen
+          min_sdk="$(sed -nE "s/^sdkVersion:'([0-9]+)'.*/\1/p" <<<"$badging" | head -n1)"
+
+          # Falls aapt keinen Wert liefert, apkanalyzer verwenden
+          if [ -z "$min_sdk" ]; then
+            analyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+
+            if [ -x "$analyzer" ]; then
+              min_sdk="$("$analyzer" manifest min-sdk "$apk" 2>/dev/null || true)"
+            fi
+          fi
 
           echo "applicationId=$app_id"
           echo "versionName=$vname"
@@ -168,11 +176,8 @@ jobs:
           [ "$vcode" = "$expected_code" ] || \
             fail "versionCode does not match versionName"
 
-          if ! [[ "$min_sdk" =~ ^[0-9]+$ ]]; then
-            echo "APK badging output:"
-            grep -E "sdkVersion|targetSdkVersion" <<<"$badging" || true
-            fail "Could not read minSdk from APK"
-          fi
+          [[ "$min_sdk" =~ ^[0-9]+$ ]] || \
+            fail "Could not determine minSdk from APK"
 
           grep -q "^application-debuggable" <<<"$badging" || \
             fail "APK is not marked debuggable"
@@ -181,14 +186,16 @@ jobs:
             fail "targetSdk is not 35"
 
           if grep -q "uses-permission: name='android.permission.RECORD_AUDIO'" <<<"$badging"; then
-            fail "RECORD_AUDIO must not be requested"
+            fail "Unexpected RECORD_AUDIO permission"
           fi
 
+          # APK-Signatur prüfen
           "$bt/apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
 
           grep -q "^Verifies" apksigner.txt || \
             fail "APK signature verification failed"
 
+          # Artifact vorbereiten
           mkdir -p dist
 
           name="NIGHTLINK-${vname}-debug.apk"
@@ -208,8 +215,6 @@ jobs:
             echo "| Minimum SDK | \`$min_sdk\` |"
             echo "| Size | $(du -h "dist/$name" | cut -f1) |"
             echo "| SHA-256 | \`$(cut -d' ' -f1 "dist/$name.sha256")\` |"
-            echo ""
-            echo "Debug build only."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
