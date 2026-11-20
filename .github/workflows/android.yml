@@ -1,5 +1,4 @@
 
-       
 name: Build NIGHTLINK debug APK
 
 # Baut ausschließlich die DEBUG-APK.
@@ -241,3 +240,4 @@ jobs:
             ${{ steps.project.outputs.project_dir }}/app/build/test-results/testDebugUnitTest
           if-no-files-found: ignore
           retention-days: 14
+
