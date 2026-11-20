@@ -1,11 +1,9 @@
+
+       
 name: Build NIGHTLINK debug APK
 
-# Baut ausschließlich die DEBUG-APK (App-ID com.nightlink.app.debug). Es wird bewusst
-# KEINE Release-APK gebaut, nichts signiert (außer mit dem Debug-Schlüssel) und nichts veröffentlicht.
-#
-# Projektquelle (automatisch erkannt):
-#   1. liegt eine settings.gradle(.kts) im Repository-Root, wird dieses Projekt gebaut;
-#   2. sonst wird die (genau eine) *.zip im Repository-Root entpackt und das darin enthaltene Gradle-Projekt gebaut.
+# Baut ausschließlich die DEBUG-APK.
+# Keine Release-APK und keine Veröffentlichung.
 
 on:
   push:
@@ -45,7 +43,7 @@ jobs:
         with:
           packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      - name: Locate Gradle project (repo root or source ZIP)
+      - name: Locate Gradle project
         id: project
         shell: bash
         run: |
@@ -57,12 +55,12 @@ jobs:
             mapfile -t zips < <(find . -maxdepth 1 -type f -iname "*.zip" | sort)
 
             if [ "${#zips[@]}" -eq 0 ]; then
-              echo "::error::No Gradle project in the repository root and no project ZIP found."
+              echo "::error::No Gradle project or source ZIP found."
               exit 1
             fi
 
             if [ "${#zips[@]}" -gt 1 ]; then
-              echo "::error::Multiple ZIP files found. Keep only the NIGHTLINK source ZIP."
+              echo "::error::Multiple ZIP files found."
               printf '%s\n' "${zips[@]}"
               exit 1
             fi
@@ -78,7 +76,6 @@ jobs:
 
             if [ -z "$settings_file" ]; then
               echo "::error::No Gradle project found inside ZIP."
-              find extracted -maxdepth 3 -type f | head -80
               exit 1
             fi
 
@@ -87,19 +84,20 @@ jobs:
 
           echo "Using project: $project_dir"
           echo "project_dir=$project_dir" >> "$GITHUB_OUTPUT"
-          if [ -f "$project_dir/gradlew" ] && [ -f "$project_dir/gradle/wrapper/gradle-wrapper.jar" ]; then
+
+          if [ -f "$project_dir/gradlew" ] && \
+             [ -f "$project_dir/gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "has_wrapper=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_wrapper=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Mit Wrapper im Projekt: dessen Gradle-Version (8.9). Ohne Wrapper: Gradle 8.9 direkt installieren.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ steps.project.outputs.has_wrapper == 'true' && 'wrapper' || '8.9' }}
 
-      - name: Build debug APK (assembleDebug)
+      - name: Build debug APK
         shell: bash
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
@@ -113,13 +111,10 @@ jobs:
             chmod +x ./gradlew
             ./gradlew --no-daemon --stacktrace assembleDebug
           else
-            echo "No Gradle wrapper found; using Gradle 8.9."
             gradle --no-daemon --stacktrace assembleDebug
           fi
 
-      # Prüft die fertige APK, bevor sie als Artifact bereitgestellt wird:
-      # App-ID, Version, minSdk/targetSdk, Debug-Flag, keine Mikrofon-Berechtigung, gültige Signatur.
-      - name: Verify APK (app id, version, signature) and prepare artifact
+      - name: Verify APK and prepare artifact
         id: apk
         shell: bash
         env:
@@ -127,58 +122,90 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+
           shopt -s nullglob
           apks=(app/build/outputs/apk/debug/*.apk)
+
           if [ "${#apks[@]}" -ne 1 ]; then
             echo "::error::Expected exactly one debug APK, found ${#apks[@]}"
             ls -la app/build/outputs/apk/debug || true
             exit 1
           fi
-          apk="${apks[0]}"
 
+          apk="${apks[0]}"
           bt="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
           badging="$("$bt/aapt2" dump badging "$apk")"
 
-          app_id="$(grep -m1 -oE "^package: name='[^']+'" <<<"$badging" | sed "s/^package: name='//; s/'\$//")"
+          app_id="$(grep -m1 -oE "^package: name='[^']+'" <<<"$badging" | sed "s/^package: name='//; s/'$//")"
           vcode="$(grep -m1 -oE "versionCode='[0-9]+'" <<<"$badging" | tr -dc '0-9')"
-          vname="$(grep -m1 -oE "versionName='[^']*'" <<<"$badging" | sed "s/^versionName='//; s/'\$//")"
+          vname="$(grep -m1 -oE "versionName='[^']*'" <<<"$badging" | sed "s/^versionName='//; s/'$//")"
+
+          min_sdk="$(grep -m1 -oE "^sdkVersion:'[0-9]+'" <<<"$badging" | sed "s/^sdkVersion:'//; s/'$//")"
+
           echo "APK: $apk"
-          echo "applicationId=$app_id versionName=$vname versionCode=$vcode"
+          echo "applicationId=$app_id"
+          echo "versionName=$vname"
+          echo "versionCode=$vcode"
+          echo "minSdk=$min_sdk"
 
-          fail() { echo "::error::$1"; exit 1; }
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
 
-          [ "$app_id" = "$EXPECTED_DEBUG_APP_ID" ] || fail "Unexpected applicationId '$app_id' (expected $EXPECTED_DEBUG_APP_ID)"
-          [[ "$app_id" == *.debug ]] || fail "Debug APK must use an applicationId ending in .debug"
-          [[ "$vname" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "versionName '$vname' is not MAJOR.MINOR.PATCH"
+          [ "$app_id" = "$EXPECTED_DEBUG_APP_ID" ] || \
+            fail "Unexpected applicationId: $app_id"
+
+          [[ "$app_id" == *.debug ]] || \
+            fail "Debug APK must use an applicationId ending in .debug"
+
+          [[ "$vname" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || \
+            fail "Invalid versionName: $vname"
+
           expected_code=$(( BASH_REMATCH[1] * 10000 + BASH_REMATCH[2] * 100 + BASH_REMATCH[3] ))
-          [ "$vcode" = "$expected_code" ] || fail "versionCode $vcode does not match versionName $vname (expected $expected_code)"
-          grep -q "^application-debuggable" <<<"$badging" || fail "APK is not marked debuggable"
-          grep -q "^sdkVersion:'29'" <<<"$badging" || fail "minSdk is not 29"
-          grep -q "^targetSdkVersion:'35'" <<<"$badging" || fail "targetSdk is not 35"
+
+          [ "$vcode" = "$expected_code" ] || \
+            fail "versionCode does not match versionName"
+
+          [[ "$min_sdk" =~ ^[0-9]+$ ]] || \
+            fail "Could not read minSdk from APK"
+
+          grep -q "^application-debuggable" <<<"$badging" || \
+            fail "APK is not marked debuggable"
+
+          grep -q "^targetSdkVersion:'35'" <<<"$badging" || \
+            fail "targetSdk is not 35"
+
           if grep -q "uses-permission: name='android.permission.RECORD_AUDIO'" <<<"$badging"; then
             fail "RECORD_AUDIO must not be requested"
           fi
 
           "$bt/apksigner" verify --verbose --print-certs "$apk" | tee apksigner.txt
-          grep -q "^Verifies" apksigner.txt || fail "apksigner verification failed"
+
+          grep -q "^Verifies" apksigner.txt || \
+            fail "APK signature verification failed"
 
           mkdir -p dist
+
           name="NIGHTLINK-${vname}-debug.apk"
           cp "$apk" "dist/$name"
+
           (cd dist && sha256sum "$name" > "$name.sha256")
 
           {
             echo "### NIGHTLINK debug APK"
             echo ""
-            echo "| | |"
+            echo "| Property | Value |"
             echo "|---|---|"
             echo "| File | \`$name\` |"
-            echo "| applicationId | \`$app_id\` |"
-            echo "| versionName / versionCode | \`$vname\` / \`$vcode\` |"
+            echo "| Application ID | \`$app_id\` |"
+            echo "| Version | \`$vname\` |"
+            echo "| Version Code | \`$vcode\` |"
+            echo "| Minimum SDK | \`$min_sdk\` |"
             echo "| Size | $(du -h "dist/$name" | cut -f1) |"
             echo "| SHA-256 | \`$(cut -d' ' -f1 "dist/$name.sha256")\` |"
             echo ""
-            echo "Download the artifact **NIGHTLINK-debug-APK** below, unzip it and install the APK. Debug build only - not a release."
+            echo "Debug build only."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
@@ -189,8 +216,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Unit-Tests laufen NACH dem Upload: ein fehlschlagender Test macht den Job rot, die APK bleibt trotzdem verfügbar.
-      - name: Run unit tests (testDebugUnitTest)
+      - name: Run unit tests
         shell: bash
         env:
           PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
@@ -198,6 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+
           if [ "$HAS_WRAPPER" = "true" ]; then
             ./gradlew --no-daemon --stacktrace testDebugUnitTest
           else
