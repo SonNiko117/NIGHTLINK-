@@ -135,22 +135,24 @@ jobs:
           bt="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
           badging="$("$bt/aapt2" dump badging "$apk")"
 
-          app_id="$(grep -m1 -oE "^package: name='[^']+'" <<<"$badging" | sed "s/^package: name='//; s/'$//")"
-          vcode="$(grep -m1 -oE "versionCode='[0-9]+'" <<<"$badging" | tr -dc '0-9')"
-          vname="$(grep -m1 -oE "versionName='[^']*'" <<<"$badging" | sed "s/^versionName='//; s/'$//")"
-
-          min_sdk="$(grep -m1 -oE "^sdkVersion:'[0-9]+'" <<<"$badging" | sed "s/^sdkVersion:'//; s/'$//")"
-
-          echo "APK: $apk"
-          echo "applicationId=$app_id"
-          echo "versionName=$vname"
-          echo "versionCode=$vcode"
-          echo "minSdk=$min_sdk"
-
           fail() {
             echo "::error::$1"
             exit 1
           }
+
+          echo "APK: $apk"
+
+          app_id="$(sed -nE "s/^package: name='([^']+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+          vcode="$(sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+          vname="$(sed -nE "s/.*versionName='([^']*)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+
+          # Liest minSdk unabhängig von Leerzeichen und weiteren Feldern aus.
+          min_sdk="$(sed -nE "s/.*sdkVersion:[[:space:]]*'([0-9]+)'.*/\1/p" <<<"$badging" | sed -n '1p')"
+
+          echo "applicationId=$app_id"
+          echo "versionName=$vname"
+          echo "versionCode=$vcode"
+          echo "minSdk=$min_sdk"
 
           [ "$app_id" = "$EXPECTED_DEBUG_APP_ID" ] || \
             fail "Unexpected applicationId: $app_id"
@@ -166,8 +168,11 @@ jobs:
           [ "$vcode" = "$expected_code" ] || \
             fail "versionCode does not match versionName"
 
-          [[ "$min_sdk" =~ ^[0-9]+$ ]] || \
+          if ! [[ "$min_sdk" =~ ^[0-9]+$ ]]; then
+            echo "APK badging output:"
+            grep -E "sdkVersion|targetSdkVersion" <<<"$badging" || true
             fail "Could not read minSdk from APK"
+          fi
 
           grep -q "^application-debuggable" <<<"$badging" || \
             fail "APK is not marked debuggable"
@@ -240,4 +245,3 @@ jobs:
             ${{ steps.project.outputs.project_dir }}/app/build/test-results/testDebugUnitTest
           if-no-files-found: ignore
           retention-days: 14
-
